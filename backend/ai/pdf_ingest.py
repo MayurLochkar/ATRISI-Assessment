@@ -133,9 +133,18 @@ def _ocr_page_with_cloud_fallback(page: fitz.Page, api_key: str | None = None) -
 
         pix = page.get_pixmap(dpi=150)
         img = Image.open(io.BytesIO(pix.tobytes("png"))).convert("RGB")
-        buf = io.BytesIO()
-        img.save(buf, format="JPEG", quality=78, optimize=True)
-        jpeg_bytes = buf.getvalue()
+
+        # Resize & compress iteratively so JPEG is always under 900KB (OCR.space 1MB limit)
+        img.thumbnail((1600, 1600))
+        jpeg_bytes = b""
+        for max_dim, qual in ((1600, 75), (1400, 60), (1150, 45), (900, 35)):
+            if max(img.size) > max_dim:
+                img.thumbnail((max_dim, max_dim))
+            buf = io.BytesIO()
+            img.save(buf, format="JPEG", quality=qual, optimize=True)
+            jpeg_bytes = buf.getvalue()
+            if len(jpeg_bytes) <= 900_000:
+                break
 
         # 1. Try Gemini Vision if a Gemini key is available
         gem_key = (api_key if api_key and api_key.startswith("AIza") else "") or settings.GEMINI_API_KEY
@@ -169,25 +178,26 @@ def _ocr_page_with_cloud_fallback(page: fitz.Page, api_key: str | None = None) -
                         return txt
 
         # 2. Try OCR.space free tier (1MB limit)
-        if len(jpeg_bytes) <= 980_000:
-            with httpx.Client(timeout=20.0) as client:
-                resp = client.post(
-                    "https://api.ocr.space/parse/image",
-                    data={
-                        "apikey": "helloworld",
-                        "language": "eng",
-                        "isOverlayRequired": "false",
-                        "OCREngine": "2",
-                    },
-                    files={"file": ("page.jpg", jpeg_bytes, "image/jpeg")},
-                )
-                if resp.status_code == 200:
-                    data = resp.json()
-                    parsed = data.get("ParsedResults") or []
-                    if parsed:
-                        text = str(parsed[0].get("ParsedText", "")).strip()
-                        if text:
-                            return text
+        if jpeg_bytes and len(jpeg_bytes) <= 980_000:
+            with httpx.Client(timeout=30.0) as client:
+                for engine_id in ("2", "1"):
+                    resp = client.post(
+                        "https://api.ocr.space/parse/image",
+                        data={
+                            "apikey": "helloworld",
+                            "language": "eng",
+                            "isOverlayRequired": "false",
+                            "OCREngine": engine_id,
+                        },
+                        files={"file": ("page.jpg", jpeg_bytes, "image/jpeg")},
+                    )
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        parsed = data.get("ParsedResults") or []
+                        if parsed:
+                            text = str(parsed[0].get("ParsedText", "")).strip()
+                            if text:
+                                return text
     except Exception:
         pass
     return ""
