@@ -390,4 +390,7 @@ def get_cognitive_engine() -> CognitiveEngine:
         val_accuracy=round(val_acc * 100.0, 1),
         val_load_mae=round(val_mae, 3),
     )
+    import gc
+    del X, y_bloom, y_load, X_train, yb_train, yl_train, X_val, yb_val, yl_val
+    gc.collect()
     return _ENGINE_INSTANCE
