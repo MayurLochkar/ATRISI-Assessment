@@ -8,7 +8,8 @@ import type {
   StudyPlanResponse,
 } from '../types';
 
-const API_BASE = '/api';
+const rawApiUrl = (import.meta.env.VITE_API_URL || '').replace(/\/$/, '');
+const API_BASE = rawApiUrl ? `${rawApiUrl}/api` : '/api';
 
 async function handleResponse<T>(res: Response): Promise<T> {
   if (!res.ok) {
