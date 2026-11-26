@@ -167,7 +167,7 @@ def run_study_plan_pipeline(
     # Stage 1: Multi-modal PDF / Text Extraction + Tiktoken Chunking
     t0 = time.perf_counter()
     if pdf_bytes is not None:
-        pages, extraction_method = extract_pages_from_pdf(pdf_bytes)
+        pages, extraction_method = extract_pages_from_pdf(pdf_bytes, api_key=api_key)
     elif raw_text is not None:
         pages = pages_from_raw_text(raw_text)
         extraction_method = "raw_text_segmented"
@@ -176,8 +176,9 @@ def run_study_plan_pipeline(
 
     if not any(txt.strip() for _, txt in pages):
         raise ValueError(
-            "No readable text could be extracted from this PDF. "
-            "Please upload a text-based or legible scanned syllabus PDF."
+            "No readable text could be extracted from this scanned/image PDF. "
+            "Try the 'Paste Syllabus Text' tab, upload a text-selectable PDF, "
+            "or add a Gemini API key in Settings for Vision OCR."
         )
 
     chunks = chunk_pages(pages)

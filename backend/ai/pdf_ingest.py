@@ -117,6 +117,82 @@ def _ocr_page_with_easyocr(page: fitz.Page) -> str:
         return ""
 
 
+def _ocr_page_with_cloud_fallback(page: fitz.Page, api_key: str | None = None) -> str:
+    """
+    Zero-RAM OCR fallback for lightweight cloud deployments (e.g. Render 512Mi)
+    where local EasyOCR is not installed:
+    1) Gemini Vision OCR if GEMINI_API_KEY (or runtime key) is available.
+    2) Free OCR.space REST API (compressed JPEG < 900KB).
+    """
+    try:
+        import base64
+        import io
+        import httpx
+        from PIL import Image
+        from backend.config import settings
+
+        pix = page.get_pixmap(dpi=150)
+        img = Image.open(io.BytesIO(pix.tobytes("png"))).convert("RGB")
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=78, optimize=True)
+        jpeg_bytes = buf.getvalue()
+
+        # 1. Try Gemini Vision if a Gemini key is available
+        gem_key = (api_key if api_key and api_key.startswith("AIza") else "") or settings.GEMINI_API_KEY
+        if gem_key:
+            b64 = base64.b64encode(jpeg_bytes).decode("ascii")
+            url = (
+                f"https://generativelanguage.googleapis.com/v1beta/models/"
+                f"{settings.GEMINI_MODEL}:generateContent?key={gem_key}"
+            )
+            payload = {
+                "contents": [
+                    {
+                        "parts": [
+                            {"text": "Transcribe all readable syllabus text from this page verbatim, preserving line breaks."},
+                            {"inlineData": {"mimeType": "image/jpeg", "data": b64}},
+                        ]
+                    }
+                ]
+            }
+            with httpx.Client(timeout=20.0) as client:
+                r = client.post(url, json=payload)
+                if r.status_code == 200:
+                    txt = (
+                        r.json()
+                        .get("candidates", [{}])[0]
+                        .get("content", {})
+                        .get("parts", [{}])[0]
+                        .get("text", "")
+                    ).strip()
+                    if txt:
+                        return txt
+
+        # 2. Try OCR.space free tier (1MB limit)
+        if len(jpeg_bytes) <= 980_000:
+            with httpx.Client(timeout=20.0) as client:
+                resp = client.post(
+                    "https://api.ocr.space/parse/image",
+                    data={
+                        "apikey": "helloworld",
+                        "language": "eng",
+                        "isOverlayRequired": "false",
+                        "OCREngine": "2",
+                    },
+                    files={"file": ("page.jpg", jpeg_bytes, "image/jpeg")},
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    parsed = data.get("ParsedResults") or []
+                    if parsed:
+                        text = str(parsed[0].get("ParsedText", "")).strip()
+                        if text:
+                            return text
+    except Exception:
+        pass
+    return ""
+
+
 def _detect_section_heading(line: str, current_section: str) -> str:
     stripped = line.strip()
     if not stripped or len(stripped) > 100:
@@ -133,10 +209,12 @@ def _detect_section_heading(line: str, current_section: str) -> str:
     return current_section
 
 
-def extract_pages_from_pdf(pdf_bytes: bytes) -> Tuple[list[tuple[int, str]], str]:
+def extract_pages_from_pdf(
+    pdf_bytes: bytes, api_key: str | None = None
+) -> Tuple[list[tuple[int, str]], str]:
     """
     Extract (page_number, text) pairs from PDF bytes using PyMuPDF layout blocks,
-    with EasyOCR fallback for scanned pages and pypdf backup.
+    with EasyOCR + Cloud Vision OCR fallback for scanned pages and pypdf backup.
     """
     pages: list[tuple[int, str]] = []
     used_ocr = False
@@ -147,12 +225,14 @@ def extract_pages_from_pdf(pdf_bytes: bytes) -> Tuple[list[tuple[int, str]], str
             text = _extract_page_text_with_blocks(page)
             if len(re.sub(r"\s+", "", text)) < 35:
                 ocr_text = _ocr_page_with_easyocr(page)
+                if not ocr_text and idx <= 5:
+                    ocr_text = _ocr_page_with_cloud_fallback(page, api_key=api_key)
                 if len(ocr_text.strip()) > len(text.strip()):
                     text = ocr_text
                     used_ocr = True
             pages.append((idx, text.strip()))
         doc.close()
-        method = "pymupdf_plus_easyocr" if used_ocr else "pymupdf_native"
+        method = "pymupdf_plus_ocr" if used_ocr else "pymupdf_native"
         if any(txt for _, txt in pages):
             return pages, method
     except Exception:
