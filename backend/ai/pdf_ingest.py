@@ -71,6 +71,14 @@ def _extract_page_text_with_blocks(page: fitz.Page) -> str:
     return (page.get_text("text") or "").strip()
 
 
+def _page_to_pil_rgb(page: fitz.Page, dpi: int = 135):
+    """Render PyMuPDF page directly to PIL RGB without PNG encode/decode overhead."""
+    from PIL import Image
+
+    pix = page.get_pixmap(dpi=dpi, alpha=False)
+    return Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+
+
 def _ocr_page_with_easyocr(page: fitz.Page) -> str:
     """Render PDF page via PyMuPDF (no Poppler required) and OCR with EasyOCR preserving lines."""
     reader = _get_easyocr_reader()
@@ -78,11 +86,8 @@ def _ocr_page_with_easyocr(page: fitz.Page) -> str:
         return ""
     try:
         import numpy as np
-        from PIL import Image
-        import io
 
-        pix = page.get_pixmap(dpi=180)
-        img = Image.open(io.BytesIO(pix.tobytes("png"))).convert("RGB")
+        img = _page_to_pil_rgb(page, dpi=150)
         arr = np.array(img)
         results = reader.readtext(arr, detail=1, paragraph=False)
         if not results:
@@ -117,34 +122,35 @@ def _ocr_page_with_easyocr(page: fitz.Page) -> str:
         return ""
 
 
-def _ocr_page_with_cloud_fallback(page: fitz.Page, api_key: str | None = None) -> str:
+def _compress_pil_under_limit(img, limit_bytes: int = 880_000) -> bytes:
+    """Fast JPEG compression under OCR.space 1MB limit."""
+    import io
+
+    img.thumbnail((1450, 1450))
+    for max_dim, qual in ((1450, 72), (1200, 52), (950, 36)):
+        if max(img.size) > max_dim:
+            img.thumbnail((max_dim, max_dim))
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=qual, optimize=True)
+        data = buf.getvalue()
+        if len(data) <= limit_bytes:
+            return data
+    return data
+
+
+def _ocr_pil_with_cloud_fallback(img, api_key: str | None = None) -> str:
     """
     Zero-RAM OCR fallback for lightweight cloud deployments (e.g. Render 512Mi)
     where local EasyOCR is not installed:
     1) Gemini Vision OCR if GEMINI_API_KEY (or runtime key) is available.
-    2) Free OCR.space REST API (compressed JPEG < 900KB).
+    2) Free OCR.space REST API (compressed JPEG < 880KB).
     """
     try:
         import base64
-        import io
         import httpx
-        from PIL import Image
         from backend.config import settings
 
-        pix = page.get_pixmap(dpi=150)
-        img = Image.open(io.BytesIO(pix.tobytes("png"))).convert("RGB")
-
-        # Resize & compress iteratively so JPEG is always under 900KB (OCR.space 1MB limit)
-        img.thumbnail((1600, 1600))
-        jpeg_bytes = b""
-        for max_dim, qual in ((1600, 75), (1400, 60), (1150, 45), (900, 35)):
-            if max(img.size) > max_dim:
-                img.thumbnail((max_dim, max_dim))
-            buf = io.BytesIO()
-            img.save(buf, format="JPEG", quality=qual, optimize=True)
-            jpeg_bytes = buf.getvalue()
-            if len(jpeg_bytes) <= 900_000:
-                break
+        jpeg_bytes = _compress_pil_under_limit(img)
 
         # 1. Try Gemini Vision if a Gemini key is available
         gem_key = (api_key if api_key and api_key.startswith("AIza") else "") or settings.GEMINI_API_KEY
@@ -164,7 +170,7 @@ def _ocr_page_with_cloud_fallback(page: fitz.Page, api_key: str | None = None) -
                     }
                 ]
             }
-            with httpx.Client(timeout=20.0) as client:
+            with httpx.Client(timeout=15.0) as client:
                 r = client.post(url, json=payload)
                 if r.status_code == 200:
                     txt = (
@@ -177,27 +183,36 @@ def _ocr_page_with_cloud_fallback(page: fitz.Page, api_key: str | None = None) -
                     if txt:
                         return txt
 
-        # 2. Try OCR.space free tier (1MB limit)
+        # 2. Try OCR.space free tier (single fast call with OCREngine 2, fallback 1 only on error)
         if jpeg_bytes and len(jpeg_bytes) <= 980_000:
-            with httpx.Client(timeout=30.0) as client:
-                for engine_id in ("2", "1"):
-                    resp = client.post(
-                        "https://api.ocr.space/parse/image",
-                        data={
-                            "apikey": "helloworld",
-                            "language": "eng",
-                            "isOverlayRequired": "false",
-                            "OCREngine": engine_id,
-                        },
-                        files={"file": ("page.jpg", jpeg_bytes, "image/jpeg")},
-                    )
-                    if resp.status_code == 200:
-                        data = resp.json()
-                        parsed = data.get("ParsedResults") or []
-                        if parsed:
-                            text = str(parsed[0].get("ParsedText", "")).strip()
-                            if text:
-                                return text
+            with httpx.Client(timeout=14.0) as client:
+                resp = client.post(
+                    "https://api.ocr.space/parse/image",
+                    data={
+                        "apikey": "helloworld",
+                        "language": "eng",
+                        "isOverlayRequired": "false",
+                        "OCREngine": "2",
+                    },
+                    files={"file": ("page.jpg", jpeg_bytes, "image/jpeg")},
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    parsed = data.get("ParsedResults") or []
+                    if parsed:
+                        text = str(parsed[0].get("ParsedText", "")).strip()
+                        if text:
+                            return text
+                    if data.get("IsErroredOnProcessing"):
+                        resp1 = client.post(
+                            "https://api.ocr.space/parse/image",
+                            data={"apikey": "helloworld", "language": "eng", "OCREngine": "1"},
+                            files={"file": ("page.jpg", jpeg_bytes, "image/jpeg")},
+                        )
+                        if resp1.status_code == 200:
+                            p1 = resp1.json().get("ParsedResults") or []
+                            if p1:
+                                return str(p1[0].get("ParsedText", "")).strip()
     except Exception:
         pass
     return ""
@@ -230,18 +245,37 @@ def extract_pages_from_pdf(
     used_ocr = False
 
     try:
+        from concurrent.futures import ThreadPoolExecutor
+
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        cloud_ocr_jobs: list[tuple[int, object]] = []
+
         for idx, page in enumerate(doc, start=1):
             text = _extract_page_text_with_blocks(page)
             if len(re.sub(r"\s+", "", text)) < 35:
                 ocr_text = _ocr_page_with_easyocr(page)
-                if not ocr_text and idx <= 5:
-                    ocr_text = _ocr_page_with_cloud_fallback(page, api_key=api_key)
                 if len(ocr_text.strip()) > len(text.strip()):
                     text = ocr_text
                     used_ocr = True
+                elif idx <= 5:
+                    # Render PIL image on main thread (PyMuPDF doc is not thread-safe)
+                    cloud_ocr_jobs.append((idx - 1, _page_to_pil_rgb(page, dpi=135)))
             pages.append((idx, text.strip()))
         doc.close()
+
+        # Run Cloud OCR calls in parallel across scanned pages
+        if cloud_ocr_jobs:
+            with ThreadPoolExecutor(max_workers=min(4, len(cloud_ocr_jobs))) as pool:
+                futures = [
+                    (page_pos, pool.submit(_ocr_pil_with_cloud_fallback, pil_img, api_key))
+                    for page_pos, pil_img in cloud_ocr_jobs
+                ]
+                for page_pos, fut in futures:
+                    ocr_res = fut.result()
+                    if len(ocr_res.strip()) > len(pages[page_pos][1].strip()):
+                        pages[page_pos] = (page_pos + 1, ocr_res.strip())
+                        used_ocr = True
+
         method = "pymupdf_plus_ocr" if used_ocr else "pymupdf_native"
         if any(txt for _, txt in pages):
             return pages, method

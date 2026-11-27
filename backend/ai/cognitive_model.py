@@ -296,6 +296,49 @@ class CognitiveEngine:
     val_accuracy: float
     val_load_mae: float
 
+    def predict_batch(
+        self,
+        items: list[tuple[str, list[str], float, int]],
+        weekly_hours_budget: float = 10.0,
+    ) -> list[tuple[BloomLevel, float, float, float]]:
+        """Vectorized batch inference over all syllabus topics in a single forward pass."""
+        if not items:
+            return []
+        feats = np.stack([featurize_topic(t, subs, r, pre) for t, subs, r, pre in items])
+        x = torch.from_numpy(feats)
+        self.model.eval()
+        with torch.no_grad():
+            logits, load_tensor = self.model(x)
+            probs_batch = torch.softmax(logits, dim=-1).numpy()
+            nn_loads = load_tensor.numpy()
+
+        total_topics = len(items)
+        results: list[tuple[BloomLevel, float, float, float]] = []
+        for idx, (title, subtopics, _, prereq_count) in enumerate(items):
+            probs = probs_batch[idx]
+            nn_load = float(nn_loads[idx])
+            combined = f"{title} {' '.join(subtopics)}".lower()
+            sym_scores = np.zeros(len(BLOOM_LEVELS), dtype=np.float32)
+            for b_idx, lvl in enumerate(BLOOM_LEVELS):
+                sym_scores[b_idx] = sum(1.0 for kw in BLOOM_KEYWORDS[lvl] if kw in combined)
+            if sym_scores.sum() > 0:
+                blended_probs = 0.72 * probs + 0.28 * (sym_scores / sym_scores.sum())
+            else:
+                blended_probs = probs
+
+            best_idx = int(np.argmax(blended_probs))
+            bloom_level = BLOOM_LEVELS[best_idx]
+            bloom_conf = float(np.clip(blended_probs[best_idx], 0.45, 0.99))
+            structural_adj = 0.25 * min(len(subtopics), 6) + 0.35 * min(prereq_count, 3)
+            cognitive_load = float(np.clip(0.8 * nn_load + 0.2 * (3.2 + structural_adj), 1.5, 9.8))
+            raw_hours = 1.4 + (cognitive_load / 10.0) * 3.8 + 0.22 * min(len(subtopics), 8)
+            if total_topics > 0 and weekly_hours_budget > 0:
+                raw_hours = max(1.5, min(12.0, round(raw_hours * 2.0) / 2.0))
+            results.append(
+                (bloom_level, round(bloom_conf, 3), round(cognitive_load, 2), round(raw_hours, 2))
+            )
+        return results
+
     def predict_topic(
         self,
         title: str,
@@ -367,12 +410,12 @@ def get_cognitive_engine() -> CognitiveEngine:
     yl_val = torch.from_numpy(y_load[val_idx])
 
     model = CognitiveLoadNet()
-    optimizer = torch.optim.AdamW(model.parameters(), lr=0.015, weight_decay=1e-3)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=0.02, weight_decay=1e-3)
     ce_loss_fn = nn.CrossEntropyLoss()
     reg_loss_fn = nn.SmoothL1Loss()
 
     model.train()
-    for _ in range(95):
+    for _ in range(65):
         optimizer.zero_grad()
         logits, pred_load = model(X_train)
         loss = ce_loss_fn(logits, yb_train) + 0.35 * reg_loss_fn(pred_load, yl_train)

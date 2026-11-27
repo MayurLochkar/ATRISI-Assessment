@@ -349,7 +349,7 @@ def optimize_study_schedule(
         integrality=integrality,
         bounds=bounds,
         constraints=constraints_milp,
-        options={"time_limit": 4.0},
+        options={"time_limit": 1.5, "mip_rel_gap": 0.02},
     )
 
     topic_week_map: dict[int, int] = {}

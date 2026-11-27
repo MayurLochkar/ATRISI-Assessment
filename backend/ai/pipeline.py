@@ -235,20 +235,18 @@ def run_study_plan_pipeline(
         )
     )
 
-    # Stage 4: PyTorch Multi-Task Cognitive Load & Bloom's Taxonomy Classifier
+    # Stage 4: PyTorch Multi-Task Cognitive Load & Bloom's Taxonomy Classifier (Batched)
     t3 = time.perf_counter()
     cog_engine = get_cognitive_engine()
     total_topics = len(topics)
-    for idx, t in enumerate(topics):
-        ratio = idx / max(1, total_topics - 1)
-        bloom, conf, load, hrs = cog_engine.predict_topic(
-            title=t.title,
-            subtopics=t.subtopics,
-            module_ratio=ratio,
-            prereq_count=len(t.prerequisites),
-            weekly_hours_budget=constraints.weekly_hours,
-            total_topics=total_topics,
-        )
+    batch_inputs = [
+        (t.title, t.subtopics, idx / max(1, total_topics - 1), len(t.prerequisites))
+        for idx, t in enumerate(topics)
+    ]
+    preds = cog_engine.predict_batch(
+        batch_inputs, weekly_hours_budget=constraints.weekly_hours
+    )
+    for t, (bloom, conf, load, hrs) in zip(topics, preds):
         t.bloom_level = bloom
         t.bloom_confidence = conf
         t.cognitive_load = load

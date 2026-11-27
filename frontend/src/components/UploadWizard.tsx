@@ -1,4 +1,4 @@
-import React, { useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   BookOpen,
   Calendar,
@@ -61,6 +61,19 @@ export const UploadWizard: React.FC<UploadWizardProps> = ({
   const [includeSpacedRepetition, setIncludeSpacedRepetition] = useState(true);
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const [elapsedSec, setElapsedSec] = useState(0);
+
+  useEffect(() => {
+    if (!isGenerating) {
+      setElapsedSec(0);
+      return;
+    }
+    const start = Date.now();
+    const id = window.setInterval(() => {
+      setElapsedSec((Date.now() - start) / 1000);
+    }, 150);
+    return () => window.clearInterval(id);
+  }, [isGenerating]);
 
   const buildOptions = (overrideWeeks?: number, overrideHours?: number): GenerateOptions => ({
     total_weeks: overrideWeeks ?? totalWeeks,
@@ -246,13 +259,42 @@ export const UploadWizard: React.FC<UploadWizardProps> = ({
             </button>
 
             {isGenerating && (
-              <div className="space-y-2 rounded-xl border-2 border-[#2A1810] bg-[#FEF3C7] p-4">
-                {PIPELINE_STAGES.map((st) => (
-                  <div key={st} className="flex items-center gap-2.5 text-xs font-semibold text-[#2A1810]">
-                    <span className="h-2 w-2 animate-ping rounded-full bg-[#B45309]" />
-                    <span>{st}</span>
-                  </div>
-                ))}
+              <div className="space-y-2.5 rounded-xl border-2 border-[#2A1810] bg-[#FEF3C7] p-4 animate-fade-up">
+                <div className="flex items-center justify-between border-b border-[#D97706]/30 pb-2">
+                  <span className="font-mono text-xs font-bold text-[#92400E]">
+                    EXECUTING 6-STAGE PIPELINE
+                  </span>
+                  <span className="rounded bg-[#4A2C1D] px-2 py-0.5 font-mono text-xs font-bold text-[#FDFBF7]">
+                    {elapsedSec.toFixed(1)}s
+                  </span>
+                </div>
+                {PIPELINE_STAGES.map((st, idx) => {
+                  const activeStage = Math.min(
+                    PIPELINE_STAGES.length - 1,
+                    Math.floor(elapsedSec / 0.65)
+                  );
+                  const done = idx < activeStage;
+                  const current = idx === activeStage;
+                  return (
+                    <div
+                      key={st}
+                      className={`flex items-center gap-2.5 text-xs font-semibold transition-opacity ${
+                        idx > activeStage ? 'opacity-45' : 'opacity-100'
+                      } text-[#2A1810]`}
+                    >
+                      <span
+                        className={`h-2.5 w-2.5 rounded-full border border-[#2A1810] ${
+                          done
+                            ? 'bg-[#065F46]'
+                            : current
+                            ? 'animate-ping bg-[#B45309]'
+                            : 'bg-[#FFFFFF]'
+                        }`}
+                      />
+                      <span>{st}</span>
+                    </div>
+                  );
+                })}
               </div>
             )}
           </div>
