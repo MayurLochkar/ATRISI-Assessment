@@ -14,22 +14,35 @@ const API_BASE = rawApiUrl ? `${rawApiUrl}/api` : '/api';
 async function fetchWithTimeout(
   url: string,
   init: RequestInit = {},
-  timeoutMs = 38000
+  timeoutMs = 90000
 ): Promise<Response> {
-  const controller = new AbortController();
-  const timer = window.setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    return await fetch(url, { ...init, signal: controller.signal });
-  } catch (err) {
-    if (err instanceof DOMException && err.name === 'AbortError') {
-      throw new Error(
-        'Request timed out at 38s (Render free-tier cold start). Please click Generate again — the server is now awake and will finish in ~2s!'
-      );
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const res = await fetch(url, { ...init, signal: controller.signal });
+      if ((res.status === 502 || res.status === 503 || res.status === 504) && attempt === 0) {
+        window.clearTimeout(timer);
+        await new Promise((r) => setTimeout(r, 2500));
+        continue;
+      }
+      return res;
+    } catch (err) {
+      if (err instanceof DOMException && err.name === 'AbortError') {
+        throw new Error(
+          'Request timed out after 90s. If this is a large scanned PDF, try Paste Syllabus Text or a text-based PDF.'
+        );
+      }
+      if (attempt === 0) {
+        await new Promise((r) => setTimeout(r, 2000));
+        continue;
+      }
+      throw err;
+    } finally {
+      window.clearTimeout(timer);
     }
-    throw err;
-  } finally {
-    window.clearTimeout(timer);
   }
+  throw new Error('Unable to reach backend server.');
 }
 
 async function handleResponse<T>(res: Response): Promise<T> {

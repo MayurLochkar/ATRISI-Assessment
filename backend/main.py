@@ -43,10 +43,8 @@ from backend.services.sample_syllabi import SAMPLES_CATALOG, ensure_sample_pdf, 
 async def lifespan(_: FastAPI):
     settings.ensure_dirs()
     init_db()
-    # Warm up PyTorch CognitiveLoadNet once at boot so first request is instant
+    # Warm up PyTorch CognitiveLoadNet once at boot; sample PDFs generate lazily on demand
     get_cognitive_engine()
-    for sid in SAMPLES_CATALOG:
-        ensure_sample_pdf(sid)
     yield
 
 

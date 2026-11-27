@@ -410,12 +410,12 @@ def get_cognitive_engine() -> CognitiveEngine:
     yl_val = torch.from_numpy(y_load[val_idx])
 
     model = CognitiveLoadNet()
-    optimizer = torch.optim.AdamW(model.parameters(), lr=0.02, weight_decay=1e-3)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=0.025, weight_decay=1e-3)
     ce_loss_fn = nn.CrossEntropyLoss()
     reg_loss_fn = nn.SmoothL1Loss()
 
     model.train()
-    for _ in range(65):
+    for _ in range(45):
         optimizer.zero_grad()
         logits, pred_load = model(X_train)
         loss = ce_loss_fn(logits, yb_train) + 0.35 * reg_loss_fn(pred_load, yl_train)

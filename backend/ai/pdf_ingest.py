@@ -226,27 +226,26 @@ def _ocr_pil_with_cloud_fallback(img, api_key: str | None = None) -> str:
                     if txt:
                         return txt
 
-        # 3. Try OCR.space free tier (Engine 2 -> Engine 1 fallback)
+        # 3. Try OCR.space free tier (single fast 11s call)
         if jpeg_bytes and len(jpeg_bytes) <= 950_000:
-            with httpx.Client(timeout=14.0) as client:
-                for eng_id in ("2", "1"):
-                    resp = client.post(
-                        "https://api.ocr.space/parse/image",
-                        data={
-                            "apikey": "helloworld",
-                            "language": "eng",
-                            "isOverlayRequired": "false",
-                            "OCREngine": eng_id,
-                        },
-                        files={"file": ("page.jpg", jpeg_bytes, "image/jpeg")},
-                    )
-                    if resp.status_code == 200:
-                        data = resp.json()
-                        parsed = data.get("ParsedResults") or []
-                        if parsed:
-                            text = str(parsed[0].get("ParsedText", "")).strip()
-                            if text:
-                                return text
+            with httpx.Client(timeout=11.0) as client:
+                resp = client.post(
+                    "https://api.ocr.space/parse/image",
+                    data={
+                        "apikey": "helloworld",
+                        "language": "eng",
+                        "isOverlayRequired": "false",
+                        "OCREngine": "2",
+                    },
+                    files={"file": ("page.jpg", jpeg_bytes, "image/jpeg")},
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    parsed = data.get("ParsedResults") or []
+                    if parsed:
+                        text = str(parsed[0].get("ParsedText", "")).strip()
+                        if text:
+                            return text
     except Exception:
         pass
     return ""
