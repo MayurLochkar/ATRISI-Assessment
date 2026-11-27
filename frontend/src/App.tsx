@@ -58,6 +58,9 @@ export function App() {
       setHealth(h);
       setSamples(s);
       setSavedPlans(p);
+      setErrorMsg((prev) =>
+        prev && prev.startsWith('Backend connection warning') ? null : prev
+      );
     } catch (err) {
       setErrorMsg(
         err instanceof Error
@@ -69,7 +72,13 @@ export function App() {
 
   useEffect(() => {
     refreshMetadata();
-  }, [refreshMetadata]);
+    const timer = window.setInterval(() => {
+      if (!health) {
+        refreshMetadata();
+      }
+    }, 5000);
+    return () => window.clearInterval(timer);
+  }, [health, refreshMetadata]);
 
   const handlePlanCreated = async (plan: StudyPlanResponse) => {
     setActivePlan(plan);

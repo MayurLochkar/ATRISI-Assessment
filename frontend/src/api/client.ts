@@ -11,6 +11,27 @@ import type {
 const rawApiUrl = (import.meta.env.VITE_API_URL || '').replace(/\/$/, '');
 const API_BASE = rawApiUrl ? `${rawApiUrl}/api` : '/api';
 
+async function fetchWithTimeout(
+  url: string,
+  init: RequestInit = {},
+  timeoutMs = 38000
+): Promise<Response> {
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } catch (err) {
+    if (err instanceof DOMException && err.name === 'AbortError') {
+      throw new Error(
+        'Request timed out at 38s (Render free-tier cold start). Please click Generate again — the server is now awake and will finish in ~2s!'
+      );
+    }
+    throw err;
+  } finally {
+    window.clearTimeout(timer);
+  }
+}
+
 async function handleResponse<T>(res: Response): Promise<T> {
   if (!res.ok) {
     let message = `Request failed (${res.status})`;
@@ -79,7 +100,7 @@ export const apiClient = {
     form.append('engine', opts.engine);
     if (opts.api_key) form.append('api_key', opts.api_key);
 
-    const res = await fetch(`${API_BASE}/plans/generate`, {
+    const res = await fetchWithTimeout(`${API_BASE}/plans/generate`, {
       method: 'POST',
       body: form,
     });
@@ -97,10 +118,13 @@ export const apiClient = {
     form.append('engine', opts.engine);
     if (opts.api_key) form.append('api_key', opts.api_key);
 
-    const res = await fetch(`${API_BASE}/samples/${encodeURIComponent(sampleId)}/generate`, {
-      method: 'POST',
-      body: form,
-    });
+    const res = await fetchWithTimeout(
+      `${API_BASE}/samples/${encodeURIComponent(sampleId)}/generate`,
+      {
+        method: 'POST',
+        body: form,
+      }
+    );
     return handleResponse<StudyPlanResponse>(res);
   },
 
@@ -109,7 +133,7 @@ export const apiClient = {
     opts: GenerateOptions,
     courseTitleHint?: string
   ): Promise<StudyPlanResponse> {
-    const res = await fetch(`${API_BASE}/plans/generate-text`, {
+    const res = await fetchWithTimeout(`${API_BASE}/plans/generate-text`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({

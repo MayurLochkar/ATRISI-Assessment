@@ -122,12 +122,12 @@ def _ocr_page_with_easyocr(page: fitz.Page) -> str:
         return ""
 
 
-def _compress_pil_under_limit(img, limit_bytes: int = 880_000) -> bytes:
+def _compress_pil_under_limit(img, limit_bytes: int = 750_000) -> bytes:
     """Fast JPEG compression under OCR.space 1MB limit."""
     import io
 
-    img.thumbnail((1450, 1450))
-    for max_dim, qual in ((1450, 72), (1200, 52), (950, 36)):
+    img.thumbnail((1250, 1250))
+    for max_dim, qual in ((1250, 70), (1050, 50), (850, 35)):
         if max(img.size) > max_dim:
             img.thumbnail((max_dim, max_dim))
         buf = io.BytesIO()
@@ -183,9 +183,9 @@ def _ocr_pil_with_cloud_fallback(img, api_key: str | None = None) -> str:
                     if txt:
                         return txt
 
-        # 2. Try OCR.space free tier (single fast call with OCREngine 2, fallback 1 only on error)
-        if jpeg_bytes and len(jpeg_bytes) <= 980_000:
-            with httpx.Client(timeout=14.0) as client:
+        # 2. Try OCR.space free tier (single fast 9s call)
+        if jpeg_bytes and len(jpeg_bytes) <= 950_000:
+            with httpx.Client(timeout=9.0) as client:
                 resp = client.post(
                     "https://api.ocr.space/parse/image",
                     data={
@@ -203,16 +203,6 @@ def _ocr_pil_with_cloud_fallback(img, api_key: str | None = None) -> str:
                         text = str(parsed[0].get("ParsedText", "")).strip()
                         if text:
                             return text
-                    if data.get("IsErroredOnProcessing"):
-                        resp1 = client.post(
-                            "https://api.ocr.space/parse/image",
-                            data={"apikey": "helloworld", "language": "eng", "OCREngine": "1"},
-                            files={"file": ("page.jpg", jpeg_bytes, "image/jpeg")},
-                        )
-                        if resp1.status_code == 200:
-                            p1 = resp1.json().get("ParsedResults") or []
-                            if p1:
-                                return str(p1[0].get("ParsedText", "")).strip()
     except Exception:
         pass
     return ""
@@ -257,9 +247,9 @@ def extract_pages_from_pdf(
                 if len(ocr_text.strip()) > len(text.strip()):
                     text = ocr_text
                     used_ocr = True
-                elif idx <= 5:
+                elif idx <= 3:
                     # Render PIL image on main thread (PyMuPDF doc is not thread-safe)
-                    cloud_ocr_jobs.append((idx - 1, _page_to_pil_rgb(page, dpi=135)))
+                    cloud_ocr_jobs.append((idx - 1, _page_to_pil_rgb(page, dpi=115)))
             pages.append((idx, text.strip()))
         doc.close()
 
