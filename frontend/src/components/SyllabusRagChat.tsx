@@ -1,11 +1,10 @@
 import React, { useState } from 'react';
 import { Bot, FileSearch, Loader2, Send, Sparkles, User } from 'lucide-react';
-import type { RagCitation, StudyEngineMode } from '../types';
+import type { RagCitation, StudyEngineMode, StudyPlanResponse } from '../types';
 import { apiClient } from '../api/client';
 
 interface SyllabusRagChatProps {
-  planId: string;
-  courseCode: string;
+  plan: StudyPlanResponse;
   engine: StudyEngineMode;
   apiKey: string;
 }
@@ -25,19 +24,30 @@ const QUICK_PROMPTS = [
 ];
 
 export const SyllabusRagChat: React.FC<SyllabusRagChatProps> = ({
-  planId,
-  courseCode,
+  plan,
   engine,
   apiKey,
 }) => {
   const [messages, setMessages] = useState<ChatMessage[]>([
     {
       role: 'assistant',
-      text: `Hello! I'm your ${courseCode} Hybrid RAG Study Coach. Ask any question about your uploaded syllabus — I retrieve answers using Sparse TF-IDF + Dense PyTorch Subword Embeddings fused via Reciprocal Rank Fusion (RRF) with exact page citations.`,
+      text: `Hello! I'm your ${plan.metadata.course_code} Hybrid RAG Study Coach. Ask any question about your uploaded syllabus — I retrieve answers using Sparse TF-IDF + Dense PyTorch Subword Embeddings fused via Reciprocal Rank Fusion (RRF) with exact page citations.`,
     },
   ]);
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
+
+  const buildFallbackContext = () => {
+    const topicLines = plan.topics.map(
+      (t) =>
+        `Module ${t.module_number}: ${t.title} (Bloom: ${t.bloom_level}, Load: ${t.cognitive_load}/10)\nSubtopics: ${t.subtopics.join(', ')}`
+    );
+    const assessLines = plan.assessments.map(
+      (a) =>
+        `Assessment: ${a.title} (${a.assessment_type}${a.target_week ? `, Week ${a.target_week}` : ''}${a.weight_percent ? `, ${a.weight_percent}%` : ''}) - ${a.description}`
+    );
+    return `${plan.metadata.course_code}: ${plan.metadata.course_title}\n\n${topicLines.join('\n\n')}\n\n${assessLines.join('\n')}`;
+  };
 
   const sendQuestion = async (q: string) => {
     const trimmed = q.trim();
@@ -48,7 +58,13 @@ export const SyllabusRagChat: React.FC<SyllabusRagChatProps> = ({
     setLoading(true);
 
     try {
-      const res = await apiClient.queryRag(planId, trimmed, engine, apiKey);
+      const res = await apiClient.queryRag(
+        plan.plan_id,
+        trimmed,
+        engine,
+        apiKey,
+        buildFallbackContext()
+      );
       setMessages((prev) => [
         ...prev,
         {

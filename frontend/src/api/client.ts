@@ -182,7 +182,8 @@ export const apiClient = {
     planId: string,
     question: string,
     engine?: StudyEngineMode,
-    apiKey?: string
+    apiKey?: string,
+    fallbackContext?: string
   ): Promise<RagQueryResponse> {
     const res = await fetch(`${API_BASE}/plans/${encodeURIComponent(planId)}/rag`, {
       method: 'POST',
@@ -192,6 +193,7 @@ export const apiClient = {
         top_k: 4,
         engine: engine || null,
         api_key: apiKey || null,
+        fallback_context: fallbackContext || null,
       }),
     });
     return handleResponse<RagQueryResponse>(res);

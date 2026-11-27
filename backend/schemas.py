@@ -182,6 +182,7 @@ class RagQueryRequest(BaseModel):
     top_k: int = Field(default=4, ge=1, le=10)
     engine: Optional[StudyEngineMode] = None
     api_key: Optional[str] = None
+    fallback_context: Optional[str] = Field(default=None, max_length=60000)
 
 
 class RagCitation(BaseModel):

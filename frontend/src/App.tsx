@@ -290,8 +290,7 @@ export function App() {
           {activeTab === 'analytics' && <AnalyticsView plan={activePlan} />}
           {activeTab === 'rag' && (
             <SyllabusRagChat
-              planId={activePlan.plan_id}
-              courseCode={activePlan.metadata.course_code}
+              plan={activePlan}
               engine={engine}
               apiKey={apiKey}
             />

@@ -318,11 +318,18 @@ def query_syllabus_rag(
     req: RagQueryRequest,
     db: Session = Depends(get_db),
 ) -> RagQueryResponse:
+    from backend.ai.pdf_ingest import chunk_pages, pages_from_raw_text
+
     res = get_plan_and_chunks(db, plan_id)
-    if res is None:
+    if res is not None:
+        plan, chunks = res
+        engine_to_use: StudyEngineMode = req.engine or plan.constraints.engine
+    elif req.fallback_context:
+        chunks = chunk_pages(pages_from_raw_text(req.fallback_context), target_tokens=200, overlap_tokens=30)
+        engine_to_use = req.engine or "local_hybrid"
+    else:
         raise HTTPException(status_code=404, detail="Study plan not found")
-    plan, chunks = res
-    engine_to_use: StudyEngineMode = req.engine or plan.constraints.engine
+
     return answer_syllabus_question(
         chunks=chunks,
         question=req.question,
