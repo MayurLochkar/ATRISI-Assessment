@@ -74,6 +74,11 @@ def get_db() -> Generator[Session, None, None]:
         db.close()
 
 
+@app.api_route("/", methods=["GET", "HEAD"])
+def root_health() -> dict:
+    return {"status": "ok", "service": settings.APP_NAME, "docs": "/docs", "health": "/api/health"}
+
+
 @app.get("/api/health")
 def health_check() -> dict:
     cog = get_cognitive_engine()
