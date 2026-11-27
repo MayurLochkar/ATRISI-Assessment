@@ -463,7 +463,7 @@ def get_cognitive_engine() -> CognitiveEngine:
             val_mae = float(torch.abs(val_pred_load - yl_val).mean().item())
         del X_train, yb_train, yl_train, X_val, yb_val, yl_val
     else:
-        model = TorchCognitiveLoadNet()
+        model = SklearnCognitiveLoadNet()
         model.fit(X[train_idx], y_bloom[train_idx], y_load[train_idx])
         probs_val, pred_load_val = model.predict_raw(X[val_idx])
         val_acc = float((probs_val.argmax(axis=-1) == y_bloom[val_idx]).mean())
