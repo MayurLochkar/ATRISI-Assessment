@@ -8,8 +8,15 @@ from dataclasses import dataclass
 from typing import Tuple
 
 import numpy as np
-import torch
-import torch.nn as nn
+
+try:
+    import torch
+    import torch.nn as nn
+    HAS_TORCH = True
+except ImportError:
+    torch = None  # type: ignore[assignment]
+    nn = None  # type: ignore[assignment]
+    HAS_TORCH = False
 
 from backend.schemas import BloomLevel
 
@@ -204,31 +211,50 @@ def featurize_topic(
     return vec
 
 
-class CognitiveLoadNet(nn.Module):
-    """Multi-task PyTorch MLP predicting Bloom's Taxonomy class & Cognitive Load (1-10)."""
+if HAS_TORCH:
+    class TorchCognitiveLoadNet(nn.Module):
+        """Multi-task PyTorch MLP predicting Bloom's Taxonomy class & Cognitive Load (1-10)."""
 
-    def __init__(self, input_dim: int = FEATURE_DIM, hidden_dim: int = 64):
-        super().__init__()
-        self.encoder = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim),
-            nn.LayerNorm(hidden_dim),
-            nn.GELU(),
-            nn.Dropout(0.10),
-            nn.Linear(hidden_dim, 32),
-            nn.GELU(),
-        )
-        self.bloom_head = nn.Linear(32, len(BLOOM_LEVELS))
-        self.load_head = nn.Sequential(
-            nn.Linear(32, 1),
-            nn.Sigmoid(),
-        )
+        def __init__(self, input_dim: int = FEATURE_DIM, hidden_dim: int = 64):
+            super().__init__()
+            self.encoder = nn.Sequential(
+                nn.Linear(input_dim, hidden_dim),
+                nn.LayerNorm(hidden_dim),
+                nn.GELU(),
+                nn.Dropout(0.10),
+                nn.Linear(hidden_dim, 32),
+                nn.GELU(),
+            )
+            self.bloom_head = nn.Linear(32, len(BLOOM_LEVELS))
+            self.load_head = nn.Sequential(
+                nn.Linear(32, 1),
+                nn.Sigmoid(),
+            )
 
-    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        h = self.encoder(x)
-        bloom_logits = self.bloom_head(h)
-        # Scale sigmoid output [0, 1] -> [1.0, 10.0]
-        load_score = 1.0 + 9.0 * self.load_head(h).squeeze(-1)
-        return bloom_logits, load_score
+        def forward(self, x: "torch.Tensor") -> Tuple["torch.Tensor", "torch.Tensor"]:
+            h = self.encoder(x)
+            bloom_logits = self.bloom_head(h)
+            load_score = 1.0 + 9.0 * self.load_head(h).squeeze(-1)
+            return bloom_logits, load_score
+
+
+class SklearnCognitiveLoadNet:
+    """Lightweight Scikit-Learn MLP fallback (zero PyTorch RAM overhead for 512Mi cloud)."""
+
+    def __init__(self):
+        from sklearn.neural_network import MLPClassifier, MLPRegressor
+
+        self.clf = MLPClassifier(hidden_layer_sizes=(64, 32), max_iter=220, random_state=42)
+        self.reg = MLPRegressor(hidden_layer_sizes=(64, 32), max_iter=220, random_state=42)
+
+    def fit(self, X: np.ndarray, y_bloom: np.ndarray, y_load: np.ndarray) -> None:
+        self.clf.fit(X, y_bloom)
+        self.reg.fit(X, y_load)
+
+    def predict_raw(self, X: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        probs = self.clf.predict_proba(X)
+        loads = np.clip(self.reg.predict(X), 1.0, 10.0)
+        return probs, loads
 
 
 def _build_training_corpus() -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -305,12 +331,15 @@ class CognitiveEngine:
         if not items:
             return []
         feats = np.stack([featurize_topic(t, subs, r, pre) for t, subs, r, pre in items])
-        x = torch.from_numpy(feats)
-        self.model.eval()
-        with torch.no_grad():
-            logits, load_tensor = self.model(x)
-            probs_batch = torch.softmax(logits, dim=-1).numpy()
-            nn_loads = load_tensor.numpy()
+        if HAS_TORCH:
+            x = torch.from_numpy(feats)
+            self.model.eval()
+            with torch.no_grad():
+                logits, load_tensor = self.model(x)
+                probs_batch = torch.softmax(logits, dim=-1).numpy()
+                nn_loads = load_tensor.numpy()
+        else:
+            probs_batch, nn_loads = self.model.predict_raw(feats)
 
         total_topics = len(items)
         results: list[tuple[BloomLevel, float, float, float]] = []
@@ -350,12 +379,17 @@ class CognitiveEngine:
     ) -> tuple[BloomLevel, float, float, float]:
         """Return (bloom_level, bloom_confidence, cognitive_load, estimated_hours)."""
         feat = featurize_topic(title, subtopics, module_ratio, prereq_count)
-        x = torch.from_numpy(feat).unsqueeze(0)
-        self.model.eval()
-        with torch.no_grad():
-            logits, load_tensor = self.model(x)
-            probs = torch.softmax(logits, dim=-1).squeeze(0).numpy()
-            nn_load = float(load_tensor.item())
+        if HAS_TORCH:
+            x = torch.from_numpy(feat).unsqueeze(0)
+            self.model.eval()
+            with torch.no_grad():
+                logits, load_tensor = self.model(x)
+                probs = torch.softmax(logits, dim=-1).squeeze(0).numpy()
+                nn_load = float(load_tensor.item())
+        else:
+            probs_batch, loads_batch = self.model.predict_raw(feat.reshape(1, -1))
+            probs = probs_batch[0]
+            nn_load = float(loads_batch[0])
 
         # Symbolic prior calibration for exact Bloom verb hits
         combined = f"{title} {' '.join(subtopics)}".lower()
@@ -393,40 +427,47 @@ def get_cognitive_engine() -> CognitiveEngine:
     if _ENGINE_INSTANCE is not None:
         return _ENGINE_INSTANCE
 
-    torch.manual_seed(42)
     np.random.seed(42)
-
     X, y_bloom, y_load = _build_training_corpus()
     perm = np.random.permutation(len(X))
     split = int(0.8 * len(X))
     train_idx, val_idx = perm[:split], perm[split:]
 
-    X_train = torch.from_numpy(X[train_idx])
-    yb_train = torch.from_numpy(y_bloom[train_idx])
-    yl_train = torch.from_numpy(y_load[train_idx])
+    if HAS_TORCH:
+        torch.manual_seed(42)
+        X_train = torch.from_numpy(X[train_idx])
+        yb_train = torch.from_numpy(y_bloom[train_idx])
+        yl_train = torch.from_numpy(y_load[train_idx])
 
-    X_val = torch.from_numpy(X[val_idx])
-    yb_val = torch.from_numpy(y_bloom[val_idx])
-    yl_val = torch.from_numpy(y_load[val_idx])
+        X_val = torch.from_numpy(X[val_idx])
+        yb_val = torch.from_numpy(y_bloom[val_idx])
+        yl_val = torch.from_numpy(y_load[val_idx])
 
-    model = CognitiveLoadNet()
-    optimizer = torch.optim.AdamW(model.parameters(), lr=0.025, weight_decay=1e-3)
-    ce_loss_fn = nn.CrossEntropyLoss()
-    reg_loss_fn = nn.SmoothL1Loss()
+        model = TorchCognitiveLoadNet()
+        optimizer = torch.optim.AdamW(model.parameters(), lr=0.025, weight_decay=1e-3)
+        ce_loss_fn = nn.CrossEntropyLoss()
+        reg_loss_fn = nn.SmoothL1Loss()
 
-    model.train()
-    for _ in range(45):
-        optimizer.zero_grad()
-        logits, pred_load = model(X_train)
-        loss = ce_loss_fn(logits, yb_train) + 0.35 * reg_loss_fn(pred_load, yl_train)
-        loss.backward()
-        optimizer.step()
+        model.train()
+        for _ in range(45):
+            optimizer.zero_grad()
+            logits, pred_load = model(X_train)
+            loss = ce_loss_fn(logits, yb_train) + 0.35 * reg_loss_fn(pred_load, yl_train)
+            loss.backward()
+            optimizer.step()
 
-    model.eval()
-    with torch.no_grad():
-        val_logits, val_pred_load = model(X_val)
-        val_acc = float((val_logits.argmax(dim=-1) == yb_val).float().mean().item())
-        val_mae = float(torch.abs(val_pred_load - yl_val).mean().item())
+        model.eval()
+        with torch.no_grad():
+            val_logits, val_pred_load = model(X_val)
+            val_acc = float((val_logits.argmax(dim=-1) == yb_val).float().mean().item())
+            val_mae = float(torch.abs(val_pred_load - yl_val).mean().item())
+        del X_train, yb_train, yl_train, X_val, yb_val, yl_val
+    else:
+        model = TorchCognitiveLoadNet()
+        model.fit(X[train_idx], y_bloom[train_idx], y_load[train_idx])
+        probs_val, pred_load_val = model.predict_raw(X[val_idx])
+        val_acc = float((probs_val.argmax(axis=-1) == y_bloom[val_idx]).mean())
+        val_mae = float(np.abs(pred_load_val - y_load[val_idx]).mean())
 
     _ENGINE_INSTANCE = CognitiveEngine(
         model=model,
@@ -434,6 +475,6 @@ def get_cognitive_engine() -> CognitiveEngine:
         val_load_mae=round(val_mae, 3),
     )
     import gc
-    del X, y_bloom, y_load, X_train, yb_train, yl_train, X_val, yb_val, yl_val
+    del X, y_bloom, y_load
     gc.collect()
     return _ENGINE_INSTANCE

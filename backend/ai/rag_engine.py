@@ -6,7 +6,6 @@ import time
 from typing import Optional
 
 import numpy as np
-import torch
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
@@ -14,32 +13,19 @@ from backend.ai.llm_providers import call_llm_text, resolve_effective_engine
 from backend.schemas import RagCitation, RagQueryResponse, StudyEngineMode, SyllabusChunk
 
 
-def _char_ngram_dense_embeddings(texts: list[str], dim: int = 128) -> torch.Tensor:
-    """
-    Deterministic PyTorch dense semantic projection over character-trigram TF-IDF
-    using a fixed orthogonal projection matrix (Johnson-Lindenstrauss).
-    """
-    if not texts:
-        return torch.zeros((0, dim), dtype=torch.float32)
-
-    char_vec = TfidfVectorizer(analyzer="char_wb", ngram_range=(3, 5), min_df=1, max_features=2048)
-    mat = char_vec.fit_transform(texts).toarray().astype(np.float32)
-
-    rng = np.random.default_rng(2026)
-    proj = rng.normal(0.0, 1.0 / np.sqrt(dim), size=(mat.shape[1], dim)).astype(np.float32)
-    dense = torch.from_numpy(mat @ proj)
-    dense = torch.nn.functional.normalize(dense, p=2, dim=1)
-    return dense
+def _l2_normalize(arr: np.ndarray) -> np.ndarray:
+    norms = np.linalg.norm(arr, axis=1, keepdims=True)
+    norms = np.where(norms > 1e-8, norms, 1.0)
+    return arr / norms
 
 
 def _query_dense_vector(
     query: str,
     char_vec: TfidfVectorizer,
     proj_matrix: np.ndarray,
-) -> torch.Tensor:
+) -> np.ndarray:
     q_mat = char_vec.transform([query]).toarray().astype(np.float32)
-    q_dense = torch.from_numpy(q_mat @ proj_matrix)
-    return torch.nn.functional.normalize(q_dense, p=2, dim=1)
+    return _l2_normalize(q_mat @ proj_matrix)
 
 
 def retrieve_hybrid_rrf(
@@ -64,15 +50,15 @@ def retrieve_hybrid_rrf(
     sparse_order = np.argsort(-sparse_sims)
     sparse_rank = {int(idx): rank + 1 for rank, idx in enumerate(sparse_order)}
 
-    # 2. Dense PyTorch character-subword semantic projection
+    # 2. Dense character-subword semantic projection
     char_vec = TfidfVectorizer(analyzer="char_wb", ngram_range=(3, 5), min_df=1, max_features=2048)
     mat = char_vec.fit_transform(docs).toarray().astype(np.float32)
     dim = 128
     rng = np.random.default_rng(2026)
     proj = rng.normal(0.0, 1.0 / np.sqrt(dim), size=(mat.shape[1], dim)).astype(np.float32)
-    doc_dense = torch.nn.functional.normalize(torch.from_numpy(mat @ proj), p=2, dim=1)
+    doc_dense = _l2_normalize(mat @ proj)
     q_dense = _query_dense_vector(question, char_vec, proj)
-    dense_sims = torch.matmul(doc_dense, q_dense.squeeze(0)).numpy()
+    dense_sims = (doc_dense @ q_dense[0]).ravel()
 
     dense_order = np.argsort(-dense_sims)
     dense_rank = {int(idx): rank + 1 for rank, idx in enumerate(dense_order)}
