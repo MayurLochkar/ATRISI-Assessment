@@ -48,6 +48,8 @@ export function App() {
     () => localStorage.getItem('syllabai_apikey') || ''
   );
 
+  const [isWakingUp, setIsWakingUp] = useState(false);
+
   const refreshMetadata = useCallback(async () => {
     try {
       const [h, s, p] = await Promise.all([
@@ -58,15 +60,12 @@ export function App() {
       setHealth(h);
       setSamples(s);
       setSavedPlans(p);
+      setIsWakingUp(false);
       setErrorMsg((prev) =>
-        prev && prev.startsWith('Backend connection warning') ? null : prev
+        prev && prev.startsWith('Backend connection') ? null : prev
       );
-    } catch (err) {
-      setErrorMsg(
-        err instanceof Error
-          ? `Backend connection warning: ${err.message}. Ensure FastAPI is running on port 8000.`
-          : 'Unable to reach backend API.'
-      );
+    } catch {
+      setIsWakingUp(true);
     }
   }, []);
 
@@ -76,7 +75,7 @@ export function App() {
       if (!health) {
         refreshMetadata();
       }
-    }, 5000);
+    }, 3500);
     return () => window.clearInterval(timer);
   }, [health, refreshMetadata]);
 
@@ -200,6 +199,19 @@ export function App() {
         onOpenTelemetry={() => setTelemetryOpen(true)}
         onOpenSettings={() => setSettingsOpen(true)}
       />
+
+      {isWakingUp && !health && (
+        <div className="mx-auto mt-5 max-w-7xl px-5 sm:px-8">
+          <div className="brutal-card flex items-center justify-between gap-3 bg-[#FEF3C7] px-5 py-3.5 text-sm font-bold text-[#92400E]">
+            <div className="flex items-center gap-2.5">
+              <span className="h-3 w-3 animate-ping rounded-full bg-[#B45309]" />
+              <span>
+                Waking up AI Backend Server (Render Free Tier cold start ~30–45s)... Auto-connecting!
+              </span>
+            </div>
+          </div>
+        </div>
+      )}
 
       {errorMsg && (
         <div className="mx-auto mt-5 max-w-7xl px-5 sm:px-8">

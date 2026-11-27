@@ -16,14 +16,14 @@ async function fetchWithTimeout(
   init: RequestInit = {},
   timeoutMs = 90000
 ): Promise<Response> {
-  for (let attempt = 0; attempt < 2; attempt++) {
+  for (let attempt = 0; attempt < 5; attempt++) {
     const controller = new AbortController();
     const timer = window.setTimeout(() => controller.abort(), timeoutMs);
     try {
       const res = await fetch(url, { ...init, signal: controller.signal });
-      if ((res.status === 502 || res.status === 503 || res.status === 504) && attempt === 0) {
+      if ((res.status === 502 || res.status === 503 || res.status === 504) && attempt < 4) {
         window.clearTimeout(timer);
-        await new Promise((r) => setTimeout(r, 2500));
+        await new Promise((r) => setTimeout(r, 4000));
         continue;
       }
       return res;
@@ -33,8 +33,9 @@ async function fetchWithTimeout(
           'Request timed out after 90s. If this is a large scanned PDF, try Paste Syllabus Text or a text-based PDF.'
         );
       }
-      if (attempt === 0) {
-        await new Promise((r) => setTimeout(r, 2000));
+      // Browser throws TypeError: Failed to fetch when Render returns 502/503 without CORS while waking up
+      if (attempt < 4) {
+        await new Promise((r) => setTimeout(r, 4000));
         continue;
       }
       throw err;
@@ -42,7 +43,7 @@ async function fetchWithTimeout(
       window.clearTimeout(timer);
     }
   }
-  throw new Error('Unable to reach backend server.');
+  throw new Error('Unable to reach backend server. Please wait 20s and try again.');
 }
 
 async function handleResponse<T>(res: Response): Promise<T> {
