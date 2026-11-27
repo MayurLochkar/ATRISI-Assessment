@@ -138,12 +138,23 @@ def _compress_pil_under_limit(img, limit_bytes: int = 750_000) -> bytes:
     return data
 
 
+def _ocr_pil_with_pytesseract(img) -> str:
+    """Fast, low-RAM (~30MB) local OCR via Tesseract binary if installed (e.g. Docker/Linux)."""
+    try:
+        import pytesseract
+
+        txt = pytesseract.image_to_string(img, lang="eng")
+        return txt.strip()
+    except Exception:
+        return ""
+
+
 def _ocr_pil_with_cloud_fallback(img, api_key: str | None = None) -> str:
     """
-    Zero-RAM OCR fallback for lightweight cloud deployments (e.g. Render 512Mi)
-    where local EasyOCR is not installed:
-    1) Gemini Vision OCR if GEMINI_API_KEY (or runtime key) is available.
-    2) Free OCR.space REST API (compressed JPEG < 880KB).
+    Zero-RAM OCR fallback for lightweight cloud deployments (e.g. Render 512Mi):
+    1) Gemini Vision OCR if GEMINI_API_KEY (or runtime AIza... key) is available.
+    2) OpenAI Vision OCR if OPENAI_API_KEY (or runtime sk-... key) is available.
+    3) Free OCR.space REST API (compressed JPEG < 750KB, trying Engine 2 then Engine 1).
     """
     try:
         import base64
@@ -183,26 +194,59 @@ def _ocr_pil_with_cloud_fallback(img, api_key: str | None = None) -> str:
                     if txt:
                         return txt
 
-        # 2. Try OCR.space free tier (single fast 9s call)
-        if jpeg_bytes and len(jpeg_bytes) <= 950_000:
-            with httpx.Client(timeout=9.0) as client:
-                resp = client.post(
-                    "https://api.ocr.space/parse/image",
-                    data={
-                        "apikey": "helloworld",
-                        "language": "eng",
-                        "isOverlayRequired": "false",
-                        "OCREngine": "2",
+        # 2. Try OpenAI Vision if an OpenAI key is available
+        oai_key = (api_key if api_key and api_key.startswith("sk-") else "") or settings.OPENAI_API_KEY
+        if oai_key:
+            b64 = base64.b64encode(jpeg_bytes).decode("ascii")
+            with httpx.Client(timeout=15.0) as client:
+                r = client.post(
+                    "https://api.openai.com/v1/chat/completions",
+                    headers={"Authorization": f"Bearer {oai_key}"},
+                    json={
+                        "model": settings.OPENAI_MODEL,
+                        "messages": [
+                            {
+                                "role": "user",
+                                "content": [
+                                    {"type": "text", "text": "Transcribe all syllabus text from this image verbatim, preserving line breaks."},
+                                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
+                                ],
+                            }
+                        ],
+                        "max_tokens": 1800,
                     },
-                    files={"file": ("page.jpg", jpeg_bytes, "image/jpeg")},
                 )
-                if resp.status_code == 200:
-                    data = resp.json()
-                    parsed = data.get("ParsedResults") or []
-                    if parsed:
-                        text = str(parsed[0].get("ParsedText", "")).strip()
-                        if text:
-                            return text
+                if r.status_code == 200:
+                    txt = (
+                        r.json()
+                        .get("choices", [{}])[0]
+                        .get("message", {})
+                        .get("content", "")
+                    ).strip()
+                    if txt:
+                        return txt
+
+        # 3. Try OCR.space free tier (Engine 2 -> Engine 1 fallback)
+        if jpeg_bytes and len(jpeg_bytes) <= 950_000:
+            with httpx.Client(timeout=14.0) as client:
+                for eng_id in ("2", "1"):
+                    resp = client.post(
+                        "https://api.ocr.space/parse/image",
+                        data={
+                            "apikey": "helloworld",
+                            "language": "eng",
+                            "isOverlayRequired": "false",
+                            "OCREngine": eng_id,
+                        },
+                        files={"file": ("page.jpg", jpeg_bytes, "image/jpeg")},
+                    )
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        parsed = data.get("ParsedResults") or []
+                        if parsed:
+                            text = str(parsed[0].get("ParsedText", "")).strip()
+                            if text:
+                                return text
     except Exception:
         pass
     return ""
@@ -243,12 +287,17 @@ def extract_pages_from_pdf(
         for idx, page in enumerate(doc, start=1):
             text = _extract_page_text_with_blocks(page)
             if len(re.sub(r"\s+", "", text)) < 35:
-                ocr_text = _ocr_page_with_easyocr(page)
+                # 1) Try fast Tesseract binary if installed (e.g. Docker / Linux)
+                pil_for_tess = _page_to_pil_rgb(page, dpi=150)
+                ocr_text = _ocr_pil_with_pytesseract(pil_for_tess)
+                # 2) Try local EasyOCR if available
+                if not ocr_text:
+                    ocr_text = _ocr_page_with_easyocr(page)
                 if len(ocr_text.strip()) > len(text.strip()):
                     text = ocr_text
                     used_ocr = True
                 elif idx <= 3:
-                    # Render PIL image on main thread (PyMuPDF doc is not thread-safe)
+                    # 3) Queue Cloud Vision / OCR.space fallback
                     cloud_ocr_jobs.append((idx - 1, _page_to_pil_rgb(page, dpi=115)))
             pages.append((idx, text.strip()))
         doc.close()
